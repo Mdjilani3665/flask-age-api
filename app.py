@@ -7,22 +7,22 @@ import numpy as np
 
 app = Flask(__name__)
 
-# Load age detection model
+# ---- Load Age Model ----
 AGE_PROTOTXT = "age_deploy.prototxt"
 AGE_MODEL = "age_net.caffemodel"
 AGE_LIST = ['(0-2)', '(4-6)', '(8-12)', '(15-20)', '(25-32)', '(38-43)', '(48-53)', '(60-100)']
-
 age_net = cv2.dnn.readNetFromCaffe(AGE_PROTOTXT, AGE_MODEL)
 
-# Load face detector
+# ---- Load Face Detector ----
 FACE_PROTO = "opencv_face_detector.pbtxt"
 FACE_MODEL = "opencv_face_detector_uint8.pb"
-face_net = cv2.dnn.readNet(FACE_MODEL, FACE_PROTO)
+face_net = cv2.dnn.readNetFromCaffe(FACE_PROTO, FACE_MODEL)
 
+# ---- Predict age from image bytes ----
 def predict_age_from_image(image_bytes):
     # Convert bytes to OpenCV image
     img = Image.open(BytesIO(image_bytes)).convert('RGB')
-    img = np.array(img)[:, :, ::-1].copy()  # PIL RGB → OpenCV BGR
+    img = np.array(img)[:, :, ::-1].copy()  # PIL RGB -> OpenCV BGR
 
     h, w = img.shape[:2]
 
@@ -35,22 +35,33 @@ def predict_age_from_image(image_bytes):
 
     for i in range(detections.shape[2]):
         confidence = detections[0, 0, i, 2]
-        if confidence > 0.6:  # confidence threshold
+        if confidence > 0.6:
             box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
             startX, startY, endX, endY = box.astype(int)
+            
+            # Ensure box is inside image bounds
+            startX, startY = max(0, startX), max(0, startY)
+            endX, endY = min(w-1, endX), min(h-1, endY)
 
             face = img[startY:endY, startX:endX]
-            face_blob = cv2.dnn.blobFromImage(face, 1.0, (227, 227), [78.4263377603, 87.7689143744, 114.895847746], swapRB=False)
+            if face.size == 0:
+                continue
+
+            face_blob = cv2.dnn.blobFromImage(
+                face, 1.0, (227, 227),
+                [78.4263377603, 87.7689143744, 114.895847746],
+                swapRB=False
+            )
             age_net.setInput(face_blob)
             preds = age_net.forward()
             age = AGE_LIST[preds[0].argmax()]
             ages.append(age)
 
-    if ages:
-        return ages  # Returns list of ages if multiple faces
-    else:
+    if not ages:
         return ["No face detected"]
+    return ages  # list of detected ages
 
+# ---- Flask route ----
 @app.route('/predict_age', methods=['POST'])
 def predict_age():
     data = request.get_json(silent=True)
@@ -72,6 +83,10 @@ def predict_age():
         ages = predict_age_from_image(image_bytes)
     except Exception as e:
         return jsonify({'error': 'Model error: ' + str(e)}), 500
+
+    # Return single age if only one face
+    if len(ages) == 1:
+        ages = ages[0]
 
     return jsonify({'age': ages}), 200
 
